@@ -11,17 +11,34 @@ def init_db():
     conn = sqlite3.connect('orders.db')
     cursor = conn.cursor()
     
-    # Создаем таблицу для заказов
+    # Обновляем структуру таблицы для нового формата
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             customer_name TEXT NOT NULL,
             customer_email TEXT NOT NULL,
             customer_phone TEXT,
-            service_type TEXT NOT NULL,
+            customer_address TEXT,
+            delivery_time TEXT,
+            comments TEXT,
+            total_services INTEGER NOT NULL,
+            total_price TEXT NOT NULL,
             order_details TEXT NOT NULL,
             order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             status TEXT DEFAULT 'pending'
+        )
+    ''')
+    
+    # Таблица для отдельных услуг в заказе
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS order_services (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER NOT NULL,
+            service_id TEXT NOT NULL,
+            service_name TEXT NOT NULL,
+            service_price TEXT NOT NULL,
+            service_description TEXT,
+            FOREIGN KEY (order_id) REFERENCES orders (id) ON DELETE CASCADE
         )
     ''')
     
@@ -59,7 +76,7 @@ def create_order():
         order_data = request.get_json()
         
         # Валидация обязательных полей
-        required_fields = ['customer_name', 'customer_email', 'service_type', 'order_details']
+        required_fields = ['name', 'email', 'total_services', 'total_price']
         for field in required_fields:
             if field not in order_data or not order_data[field]:
                 return jsonify({'error': f'Missing required field: {field}'}), 400
@@ -68,20 +85,41 @@ def create_order():
         conn = sqlite3.connect('orders.db')
         cursor = conn.cursor()
         
-        # Вставляем данные заказа
+        # Вставляем основные данные заказа
         cursor.execute('''
-            INSERT INTO orders (customer_name, customer_email, customer_phone, service_type, order_details)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO orders (
+                customer_name, customer_email, customer_phone, customer_address,
+                delivery_time, comments, total_services, total_price, order_details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
-            order_data['customer_name'],
-            order_data['customer_email'],
-            order_data.get('customer_phone', ''),
-            order_data['service_type'],
-            json.dumps(order_data['order_details'], ensure_ascii=False)
+            order_data['name'],
+            order_data['email'],
+            order_data.get('phone', ''),
+            order_data.get('address', ''),
+            order_data.get('delivery_time', ''),
+            order_data.get('comments', ''),
+            int(order_data['total_services']),
+            order_data['total_price'],
+            json.dumps(order_data, ensure_ascii=False)  # Сохраняем весь JSON для резервной копии
         ))
         
         # Получаем ID созданного заказа
         order_id = cursor.lastrowid
+        
+        # Добавляем услуги в отдельную таблицу
+        total_services = int(order_data['total_services'])
+        for i in range(total_services):
+            service_prefix = f'service_{i}_'
+            service_id = order_data.get(f'{service_prefix}id')
+            service_name = order_data.get(f'{service_prefix}name')
+            service_price = order_data.get(f'{service_prefix}price')
+            service_description = order_data.get(f'{service_prefix}description', '')
+            
+            if service_id and service_name and service_price:
+                cursor.execute('''
+                    INSERT INTO order_services (order_id, service_id, service_name, service_price, service_description)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (order_id, service_id, service_name, service_price, service_description))
         
         conn.commit()
         conn.close()
@@ -102,12 +140,16 @@ def get_orders():
         conn = sqlite3.connect('orders.db')
         cursor = conn.cursor()
         
-        # Получаем все заказы
+        # Получаем все заказы с услугами
         cursor.execute('''
-            SELECT id, customer_name, customer_email, customer_phone, service_type, 
-                   order_details, order_date, status 
-            FROM orders 
-            ORDER BY order_date DESC
+            SELECT o.id, o.customer_name, o.customer_email, o.customer_phone, 
+                   o.customer_address, o.delivery_time, o.comments,
+                   o.total_services, o.total_price, o.order_date, o.status,
+                   GROUP_CONCAT(os.service_name) as service_names
+            FROM orders o
+            LEFT JOIN order_services os ON o.id = os.order_id
+            GROUP BY o.id
+            ORDER BY o.order_date DESC
         ''')
         
         orders = []
@@ -117,10 +159,14 @@ def get_orders():
                 'customer_name': row[1],
                 'customer_email': row[2],
                 'customer_phone': row[3],
-                'service_type': row[4],
-                'order_details': json.loads(row[5]),
-                'order_date': row[6],
-                'status': row[7]
+                'customer_address': row[4],
+                'delivery_time': row[5],
+                'comments': row[6],
+                'total_services': row[7],
+                'total_price': row[8],
+                'order_date': row[9],
+                'status': row[10],
+                'service_names': row[11] if row[11] else 'No services'
             })
         
         conn.close()
@@ -137,33 +183,89 @@ def get_order(order_id):
         conn = sqlite3.connect('orders.db')
         cursor = conn.cursor()
         
+        # Получаем основную информацию о заказе
         cursor.execute('''
-            SELECT id, customer_name, customer_email, customer_phone, service_type, 
+            SELECT id, customer_name, customer_email, customer_phone, customer_address,
+                   delivery_time, comments, total_services, total_price, 
                    order_details, order_date, status 
             FROM orders 
             WHERE id = ?
         ''', (order_id,))
         
         row = cursor.fetchone()
+        
+        if not row:
+            conn.close()
+            return jsonify({'error': 'Order not found'}), 404
+        
+        # Получаем услуги для этого заказа
+        cursor.execute('''
+            SELECT service_id, service_name, service_price, service_description
+            FROM order_services 
+            WHERE order_id = ?
+        ''', (order_id,))
+        
+        services = []
+        for service_row in cursor.fetchall():
+            services.append({
+                'service_id': service_row[0],
+                'service_name': service_row[1],
+                'service_price': service_row[2],
+                'service_description': service_row[3]
+            })
+        
         conn.close()
         
-        if row:
-            order = {
-                'id': row[0],
-                'customer_name': row[1],
-                'customer_email': row[2],
-                'customer_phone': row[3],
-                'service_type': row[4],
-                'order_details': json.loads(row[5]),
-                'order_date': row[6],
-                'status': row[7]
-            }
-            return jsonify(order), 200
-        else:
-            return jsonify({'error': 'Order not found'}), 404
+        order = {
+            'id': row[0],
+            'customer_name': row[1],
+            'customer_email': row[2],
+            'customer_phone': row[3],
+            'customer_address': row[4],
+            'delivery_time': row[5],
+            'comments': row[6],
+            'total_services': row[7],
+            'total_price': row[8],
+            'order_details': json.loads(row[9]),
+            'order_date': row[10],
+            'status': row[11],
+            'services': services
+        }
+        
+        return jsonify(order), 200
             
     except Exception as e:
         print(f"Ошибка при получении заказа: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/orders/<int:order_id>/services', methods=['GET'])
+def get_order_services(order_id):
+    """Получить все услуги для конкретного заказа"""
+    try:
+        conn = sqlite3.connect('orders.db')
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT service_id, service_name, service_price, service_description
+            FROM order_services 
+            WHERE order_id = ?
+        ''', (order_id,))
+        
+        services = []
+        for row in cursor.fetchall():
+            services.append({
+                'service_id': row[0],
+                'service_name': row[1],
+                'service_price': row[2],
+                'service_description': row[3]
+            })
+        
+        conn.close()
+        
+        return jsonify(services), 200
+            
+    except Exception as e:
+        print(f"Ошибка при получении услуг заказа: {e}")
         return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
