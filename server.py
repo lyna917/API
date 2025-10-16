@@ -143,7 +143,7 @@ def get_orders():
         cursor.execute('''
             SELECT o.id, o.customer_name, o.customer_email, o.customer_phone, 
                    o.customer_address, o.delivery_time, o.comments,
-                   o.total_services, o.total_price, o.order_date, o.status,
+                   o.total_services, o.total_price, o.order_date,
                    GROUP_CONCAT(os.service_name) as service_names
             FROM orders o
             LEFT JOIN order_services os ON o.id = os.order_id
@@ -164,8 +164,7 @@ def get_orders():
                 'total_services': row[7],
                 'total_price': row[8],
                 'order_date': row[9],
-                'status': row[10],
-                'service_names': row[11] if row[11] else 'No services'
+                'service_names': row[10] if row[10] else 'No services'
             })
         
         conn.close()
@@ -186,7 +185,7 @@ def get_order(order_id):
         cursor.execute('''
             SELECT id, customer_name, customer_email, customer_phone, customer_address,
                    delivery_time, comments, total_services, total_price, 
-                   order_details, order_date, status 
+                   order_details, order_date
             FROM orders 
             WHERE id = ?
         ''', (order_id,))
@@ -227,7 +226,6 @@ def get_order(order_id):
             'total_price': row[8],
             'order_details': json.loads(row[9]),
             'order_date': row[10],
-            'status': row[11],
             'services': services
         }
         
