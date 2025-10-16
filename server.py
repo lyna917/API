@@ -24,8 +24,7 @@ def init_db():
             total_services INTEGER NOT NULL,
             total_price TEXT NOT NULL,
             order_details TEXT NOT NULL,
-            order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            status TEXT DEFAULT 'pending'
+            order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
@@ -266,6 +265,118 @@ def get_order_services(order_id):
             
     except Exception as e:
         print(f"Ошибка при получении услуг заказа: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/orders/<int:order_id>', methods=['PUT', 'OPTIONS'])
+def update_order(order_id):
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    try:
+        # Получаем данные из запроса
+        order_data = request.get_json()
+        
+        # Валидация обязательных полей
+        required_fields = ['name', 'email', 'total_services', 'total_price']
+        for field in required_fields:
+            if field not in order_data or not order_data[field]:
+                return jsonify({'error': f'Missing required field: {field}'}), 400
+        
+        # Подключаемся к базе данных
+        conn = sqlite3.connect('orders.db')
+        cursor = conn.cursor()
+        
+        # Проверяем существование заказа
+        cursor.execute('SELECT id FROM orders WHERE id = ?', (order_id,))
+        if not cursor.fetchone():
+            conn.close()
+            return jsonify({'error': 'Order not found'}), 404
+        
+        # Обновляем основные данные заказа
+        cursor.execute('''
+            UPDATE orders SET
+                customer_name = ?,
+                customer_email = ?,
+                customer_phone = ?,
+                customer_address = ?,
+                delivery_time = ?,
+                comments = ?,
+                total_services = ?,
+                total_price = ?,
+                order_details = ?
+            WHERE id = ?
+        ''', (
+            order_data['name'],
+            order_data['email'],
+            order_data.get('phone', ''),
+            order_data.get('address', ''),
+            order_data.get('delivery_time', ''),
+            order_data.get('comments', ''),
+            int(order_data['total_services']),
+            order_data['total_price'],
+            json.dumps(order_data, ensure_ascii=False),
+            order_id
+        ))
+        
+        # Удаляем старые услуги
+        cursor.execute('DELETE FROM order_services WHERE order_id = ?', (order_id,))
+        
+        # Добавляем обновленные услуги
+        total_services = int(order_data['total_services'])
+        for i in range(total_services):
+            service_prefix = f'service_{i}_'
+            service_id = order_data.get(f'{service_prefix}id')
+            service_name = order_data.get(f'{service_prefix}name')
+            service_price = order_data.get(f'{service_prefix}price')
+            service_description = order_data.get(f'{service_prefix}description', '')
+            
+            if service_id and service_name and service_price:
+                cursor.execute('''
+                    INSERT INTO order_services (order_id, service_id, service_name, service_price, service_description)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (order_id, service_id, service_name, service_price, service_description))
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'order_id': order_id,
+            'message': 'Order updated successfully'
+        }), 200
+        
+    except Exception as e:
+        print(f"Ошибка при обновлении заказа: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/orders/<int:order_id>', methods=['DELETE', 'OPTIONS'])
+def delete_order(order_id):
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    try:
+        conn = sqlite3.connect('orders.db')
+        cursor = conn.cursor()
+        
+        # Проверяем существование заказа
+        cursor.execute('SELECT id FROM orders WHERE id = ?', (order_id,))
+        if not cursor.fetchone():
+            conn.close()
+            return jsonify({'error': 'Order not found'}), 404
+        
+        # Удаляем заказ (благодаря CASCADE удалятся и связанные услуги)
+        cursor.execute('DELETE FROM orders WHERE id = ?', (order_id,))
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Order deleted successfully'
+        }), 200
+        
+    except Exception as e:
+        print(f"Ошибка при удалении заказа: {e}")
         return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
